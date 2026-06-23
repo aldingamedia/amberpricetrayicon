@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+dist/
+installer/Output/
+*.spec
+__pycache__/
+*.pyc
+
+# Local environments / secrets
+.venv/
+.env
+config.json
