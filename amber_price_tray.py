@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -284,18 +285,21 @@ class AmberTray:
         self.refresh()
 
     def _open_settings(self):
+        # Tkinter can't run on this (worker) thread, so launch the setup dialog
+        # as a separate process, then reload the config it writes.
         if self._settings_open:
             return
         self._settings_open = True
 
         def run():
             try:
-                res = prompt_for_token(self.cfg.get("api_token", ""))
-                if res:
-                    self.cfg["api_token"] = res["token"]
-                    self.cfg["site_id"] = res["site_id"]
-                    save_config(self.cfg)
-                    self.refresh()
+                if getattr(sys, "frozen", False):
+                    args = [sys.executable, "--setup"]
+                else:
+                    args = [sys.executable, os.path.abspath(__file__), "--setup"]
+                subprocess.run(args)
+                self.cfg.update(load_config())
+                self.refresh()
             finally:
                 self._settings_open = False
 
@@ -393,14 +397,27 @@ class AmberTray:
         self.icon.run()
 
 
+def run_setup_dialog() -> bool:
+    """Show the API-key dialog (must run on the main thread) and save. Returns
+    True if the key was saved."""
+    cfg = load_config()
+    res = prompt_for_token(cfg.get("api_token", ""))
+    if not res:
+        return False
+    cfg["api_token"], cfg["site_id"] = res["token"], res["site_id"]
+    save_config(cfg)
+    return True
+
+
 def main():
+    if "--setup" in sys.argv:
+        run_setup_dialog()
+        return
     cfg = load_config()
     if not cfg.get("api_token") or not cfg.get("site_id"):
-        res = prompt_for_token(cfg.get("api_token", ""))
-        if not res:
+        if not run_setup_dialog():
             return  # user cancelled setup
-        cfg["api_token"], cfg["site_id"] = res["token"], res["site_id"]
-        save_config(cfg)
+        cfg = load_config()
     AmberTray(cfg).run()
 
 
