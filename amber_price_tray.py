@@ -14,8 +14,12 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from datetime import datetime
 from pathlib import Path
+
+import tkinter as tk
+from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageFont
 import pystray
@@ -165,9 +169,6 @@ def make_icon_error() -> Image.Image:
 # --- first-run / settings dialog ------------------------------------------
 def prompt_for_token(initial: str = "") -> dict | None:
     """Modal Tk dialog. Returns {'token', 'site_id'} or None if cancelled."""
-    import tkinter as tk
-    from tkinter import messagebox, ttk
-
     result: dict | None = None
     root = tk.Tk()
     root.title(f"{APP_NAME} — Setup")
@@ -186,7 +187,7 @@ def prompt_for_token(initial: str = "") -> dict | None:
     entry.focus()
     link = ttk.Label(frm, text=f"Get a key: {AMBER_KEYS_URL}", foreground="#1a73e8", cursor="hand2")
     link.grid(column=0, row=2, sticky="w")
-    link.bind("<Button-1>", lambda _e: __import__("webbrowser").open(AMBER_KEYS_URL))
+    link.bind("<Button-1>", lambda _e: webbrowser.open(AMBER_KEYS_URL))
     status = ttk.Label(frm, text="", foreground="#c0392b")
     status.grid(column=0, row=3, sticky="w", pady=(4, 0))
 
