@@ -30,13 +30,26 @@ AMBER_KEYS_URL = "https://app.amber.com.au/developers/"
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "AmberPriceTray"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+LOG_PATH = CONFIG_DIR / "amber_tray.log"
+
+
+def log(msg: str) -> None:
+    """Best-effort append to a small, size-capped log file."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 200_000:
+            LOG_PATH.write_text("", encoding="utf-8")
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
+    except OSError:
+        pass
 
 DEFAULT_CONFIG = {
     "api_token": "",
     "site_id": "",
     "mode": "import",       # import | feedin | both
     "resolution": 5,        # 5 = live spot, 30 = billing interval
-    "refresh_sec": 300,
+    "refresh_sec": 120,
 }
 
 
@@ -235,6 +248,7 @@ class AmberTray:
         self.cfg = cfg
         self.state: dict = {}
         self.error: str | None = None
+        self.last_update: datetime | None = None
         self._stop = threading.Event()
         self._settings_open = False
         self.icon = pystray.Icon(
@@ -335,14 +349,7 @@ class AmberTray:
         return f"{row['renewables']:.0f}%" if row and "renewables" in row else "—"
 
     def _updated_str(self) -> str:
-        row = self.state.get("general")
-        if not row:
-            return "—"
-        try:
-            end = datetime.fromisoformat(row["endTime"].replace("Z", "+00:00"))
-            return end.astimezone().strftime("%H:%M")
-        except (KeyError, ValueError):
-            return "—"
+        return self.last_update.strftime("%H:%M:%S") if self.last_update else "—"
 
     # --- refresh -----------------------------------------------------------
     def refresh(self):
@@ -354,6 +361,13 @@ class AmberTray:
             self.error = f"offline ({e.__class__.__name__})"
         except Exception as e:  # noqa: BLE001 — keep the tray alive on any parse error
             self.error = f"error: {e}"
+        if self.error:
+            log(f"refresh {self.error}")
+        else:
+            self.last_update = datetime.now()
+            g, f = self.state.get("general"), self.state.get("feedIn")
+            log(f"refresh ok buy={g['perKwh'] if g else '?'} "
+                f"sell={sell_earn(f) if f else '?'}")
         self._render()
 
     def _render(self):
@@ -385,8 +399,12 @@ class AmberTray:
         self.icon.update_menu()
 
     def _loop(self):
+        log(f"loop started (every {self.cfg['refresh_sec']}s)")
         while not self._stop.is_set():
-            self.refresh()
+            try:
+                self.refresh()
+            except Exception as e:  # noqa: BLE001 — never let the loop thread die
+                log(f"loop error: {e!r}")
             self._stop.wait(self.cfg["refresh_sec"])
 
     def _quit(self):
