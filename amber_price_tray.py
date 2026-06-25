@@ -50,7 +50,24 @@ DEFAULT_CONFIG = {
     "mode": "import",       # import | feedin | both
     "resolution": 5,        # 5 = live spot, 30 = billing interval
     "refresh_sec": 120,
+    "notify_enabled": True,  # show toast when buy price crosses a threshold
+    "notify_low": 19.0,      # buy price <= this c/kWh → "good time to charge"
+    "notify_high": 40.0,     # buy price >= this c/kWh → "high prices ahead"
 }
+
+
+def fix_tcl_env() -> None:
+    """Drop a bogus global TCL_LIBRARY/TK_LIBRARY before tkinter starts.
+
+    Some unrelated software (e.g. CSR BlueSuite) sets these machine-wide to its
+    own Tcl, which has no usable init.tcl and breaks every tkinter app. If the
+    pointed-at folder lacks the expected file, remove the var so Python's (or
+    PyInstaller's bundled) Tcl is found instead."""
+    for var, marker in (("TCL_LIBRARY", "init.tcl"), ("TK_LIBRARY", "tk.tcl")):
+        val = os.environ.get(var)
+        if val and not (Path(val) / marker).exists():
+            log(f"dropping bad {var}={val!r}")
+            os.environ.pop(var, None)
 
 
 def resource_path(rel: str) -> Path:
@@ -242,6 +259,67 @@ def prompt_for_token(initial: str = "") -> dict | None:
     return result
 
 
+def prompt_for_notifications(cfg: dict) -> dict | None:
+    """Modal Tk dialog to set price-alert thresholds. Returns the updated
+    {'notify_enabled', 'notify_low', 'notify_high'} or None if cancelled."""
+    result: dict | None = None
+    root = tk.Tk()
+    root.title(f"{APP_NAME} — Notifications")
+    root.resizable(False, False)
+    try:
+        root.iconbitmap(str(resource_path("amber.ico")))
+    except Exception:
+        pass
+
+    frm = ttk.Frame(root, padding=16)
+    frm.grid()
+    enabled = tk.BooleanVar(value=bool(cfg.get("notify_enabled", True)))
+    ttk.Checkbutton(frm, text="Show a toast when the buy price crosses a threshold",
+                    variable=enabled).grid(column=0, row=0, columnspan=2, sticky="w")
+
+    ttk.Label(frm, text="Low price (good time to charge), c/kWh:").grid(
+        column=0, row=1, sticky="w", pady=(10, 0))
+    low_entry = ttk.Entry(frm, width=8)
+    low_entry.grid(column=1, row=1, sticky="w", pady=(10, 0), padx=(8, 0))
+    low_entry.insert(0, str(cfg.get("notify_low", 19.0)))
+
+    ttk.Label(frm, text="High price (pause charging), c/kWh:").grid(
+        column=0, row=2, sticky="w", pady=(4, 0))
+    high_entry = ttk.Entry(frm, width=8)
+    high_entry.grid(column=1, row=2, sticky="w", pady=(4, 0), padx=(8, 0))
+    high_entry.insert(0, str(cfg.get("notify_high", 40.0)))
+
+    status = ttk.Label(frm, text="", foreground="#c0392b")
+    status.grid(column=0, row=3, columnspan=2, sticky="w", pady=(8, 0))
+
+    btns = ttk.Frame(frm)
+    btns.grid(column=0, row=4, columnspan=2, pady=(12, 0), sticky="e")
+
+    def on_ok():
+        nonlocal result
+        try:
+            low = float(low_entry.get().strip())
+            high = float(high_entry.get().strip())
+        except ValueError:
+            status.config(text="Enter numbers for both thresholds.")
+            return
+        if low >= high:
+            status.config(text="Low must be below high.")
+            return
+        result = {"notify_enabled": enabled.get(), "notify_low": low, "notify_high": high}
+        root.destroy()
+
+    ttk.Button(btns, text="Cancel", command=root.destroy).grid(column=0, row=0, padx=(0, 8))
+    ttk.Button(btns, text="Save", command=on_ok).grid(column=1, row=0)
+    root.bind("<Return>", lambda _e: on_ok())
+    root.bind("<Escape>", lambda _e: root.destroy())
+
+    root.update_idletasks()
+    root.eval("tk::PlaceWindow . center")
+    root.mainloop()
+    return result
+
+
 # --- tray app --------------------------------------------------------------
 class AmberTray:
     def __init__(self, cfg: dict):
@@ -251,6 +329,7 @@ class AmberTray:
         self.last_update: datetime | None = None
         self._stop = threading.Event()
         self._settings_open = False
+        self._notify_zone: str | None = None  # last seen zone: None|low|normal|high
         self.icon = pystray.Icon(
             "AmberPriceTray",
             icon=make_icon_single("..", DESCRIPTOR_TEXT["neutral"]),
@@ -289,6 +368,7 @@ class AmberTray:
                 res_item("Billing (30 min)", 30),
             )),
             pystray.MenuItem("Refresh now", lambda: self.refresh()),
+            pystray.MenuItem("Notifications…", self._open_notify_settings),
             pystray.MenuItem("Change API key…", self._open_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
@@ -315,6 +395,26 @@ class AmberTray:
                 subprocess.run(args)
                 self.cfg.update(load_config())
                 self.refresh()
+            finally:
+                self._settings_open = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_notify_settings(self):
+        # Tkinter must run on its own (main) thread; launch as a subprocess like
+        # the API-key dialog, then reload whatever config it wrote.
+        if self._settings_open:
+            return
+        self._settings_open = True
+
+        def run():
+            try:
+                if getattr(sys, "frozen", False):
+                    args = [sys.executable, "--notify-settings"]
+                else:
+                    args = [sys.executable, os.path.abspath(__file__), "--notify-settings"]
+                subprocess.run(args)
+                self.cfg.update(load_config())
             finally:
                 self._settings_open = False
 
@@ -368,7 +468,35 @@ class AmberTray:
             g, f = self.state.get("general"), self.state.get("feedIn")
             log(f"refresh ok buy={g['perKwh'] if g else '?'} "
                 f"sell={sell_earn(f) if f else '?'}")
+            if g:
+                self._maybe_notify(g["perKwh"])
         self._render()
+
+    def _maybe_notify(self, buy: float):
+        """Toast on the edge of crossing into the low/high buy-price zone.
+
+        Edge-triggered so a price that sits in a zone only alerts once; it
+        re-arms when the price returns to normal. The first reading after
+        launch just seeds the baseline (no toast)."""
+        low = self.cfg.get("notify_low", DEFAULT_CONFIG["notify_low"])
+        high = self.cfg.get("notify_high", DEFAULT_CONFIG["notify_high"])
+        zone = "low" if buy <= low else "high" if buy >= high else "normal"
+
+        prev, self._notify_zone = self._notify_zone, zone
+        if not self.cfg.get("notify_enabled", True):
+            return
+        if prev is None or zone == prev or zone == "normal":
+            return
+        try:
+            if zone == "low":
+                self.icon.notify(f"Buy price {buy:.0f} c/kWh — good time to charge.",
+                                 f"{APP_NAME}: low price")
+            else:
+                self.icon.notify(f"Buy price {buy:.0f} c/kWh — high prices ahead, pause charging.",
+                                 f"{APP_NAME}: high price")
+            log(f"notify {zone} at buy={buy:.1f}")
+        except Exception as e:  # noqa: BLE001 — a failed toast must not kill refresh
+            log(f"notify failed: {e!r}")
 
     def _render(self):
         g, f = self.state.get("general"), self.state.get("feedIn")
@@ -428,9 +556,25 @@ def run_setup_dialog() -> bool:
     return True
 
 
+def run_notify_dialog() -> bool:
+    """Show the notifications dialog (main thread) and save. Returns True if
+    saved."""
+    cfg = load_config()
+    res = prompt_for_notifications(cfg)
+    if not res:
+        return False
+    cfg.update(res)
+    save_config(cfg)
+    return True
+
+
 def main():
+    fix_tcl_env()
     if "--setup" in sys.argv:
         run_setup_dialog()
+        return
+    if "--notify-settings" in sys.argv:
+        run_notify_dialog()
         return
     cfg = load_config()
     if not cfg.get("api_token") or not cfg.get("site_id"):

@@ -2,7 +2,7 @@
 ; Build: "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define AppName "Amber Price Tray"
-#define AppVersion "1.0.3"
+#define AppVersion "1.1.0"
 #define AppPublisher "Aldinga Media"
 #define AppExe "AmberPriceTray.exe"
 #define AppUrl "https://github.com/aldingamedia/amberpricetrayicon"
