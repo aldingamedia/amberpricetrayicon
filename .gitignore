@@ -5,6 +5,7 @@ installer/Output/
 *.spec
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Local environments / secrets
 .venv/
