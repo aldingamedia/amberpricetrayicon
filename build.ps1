@@ -12,7 +12,10 @@ $root = $PSScriptRoot
 # Native commands don't trip $ErrorActionPreference, so check exit codes.
 # (A plain function, so flags like -m pass straight through in $args.)
 function Invoke-Checked {
-    $exe, $rest = $args
+    $exe = $args[0]
+    # Keep $rest an array even with one argument, or splatting a lone string
+    # passes it one character at a time.
+    $rest = @(if ($args.Count -gt 1) { $args[1..($args.Count - 1)] })
     & $exe @rest
     if ($LASTEXITCODE -ne 0) { throw "'$exe $rest' failed with exit code $LASTEXITCODE" }
 }
