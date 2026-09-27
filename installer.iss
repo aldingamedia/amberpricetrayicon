@@ -1,8 +1,11 @@
 ; Inno Setup script for Amber Price Tray
-; Build: "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer.iss
+; Built by build.ps1, which passes the version from amber_core.APP_VERSION:
+;   ISCC.exe /DAppVersion=1.2.3 installer.iss
 
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define AppName "Amber Price Tray"
-#define AppVersion "1.1.0"
 #define AppPublisher "Aldinga Media"
 #define AppExe "AmberPriceTray.exe"
 #define AppUrl "https://github.com/aldingamedia/amberpricetrayicon"
@@ -29,6 +32,9 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; We stop the running tray app ourselves (see PrepareToInstall), so skip the
+; Restart Manager "close applications" page.
+CloseApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -51,3 +57,14 @@ Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName} now"; Flags: nowait
 [UninstallRun]
 ; Stop the running tray app before uninstalling so the exe isn't locked.
 Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExe} /F"; Flags: runhidden; RunOnceId: "StopTray"
+
+[Code]
+// On upgrade, stop the running tray app so its exe can be replaced.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /IM {#AppExe} /F', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  Result := '';
+end;
